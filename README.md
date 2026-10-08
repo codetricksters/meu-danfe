@@ -68,7 +68,9 @@ keys = extract_keys(Path("danfe.pdf"))
 by_file = extract_keys_from_dir(Path("/some/dir"), recursive=True)
 ```
 
-The vendor's rule — never request the same access key more than once within 1 second, or the account gets blocked — is enforced inside the client (`KeyPacer`), across every endpoint, for both the async client and the sync facade. There is no method that bypasses it.
+The vendor's rule — never request the same access key more than once within 1 second, or the account gets blocked — is enforced inside the client (`KeyPacer`), across every endpoint, for both the async client and the sync facade. There is no method on a given client **instance** that bypasses it.
+
+**Limitation:** pacing is per client instance, not cross-process or even cross-instance. Two separate `MeuDanfeClient`/`MeuDanfeAsyncClient` instances — including two short-lived `with MeuDanfeClient.from_env() as client:` blocks opened back-to-back for the same key — do **not** coordinate with each other. Keep one long-lived client (per process) if you need the guarantee to hold across every call for a given key; it does not hold across multiple processes at all.
 
 ## CLIs
 
