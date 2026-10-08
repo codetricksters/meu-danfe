@@ -243,3 +243,4 @@ test_output.xlsx
 
 # Git worktrees used for isolated feature work
 .worktrees/
+dist/
