@@ -48,3 +48,20 @@ def test_exclude_existing_in_skips_already_downloaded_keys(tmp_path, monkeypatch
     out = capsys.readouterr().out
     assert "0 ok, 0 falhas" in out
     assert rc == 0
+
+
+def test_env_file_in_cwd_is_used_automatically_without_env_file_flag(tmp_path, monkeypatch) -> None:
+    # README/CLAUDE.md tell a user to "copy .env.example to .env" and then
+    # just run `uv run meu-danfe --key ...` — no --env-file flag. Without
+    # reading ./.env by default, that documented flow fails.
+    pytest.importorskip("dotenv")
+    monkeypatch.delenv("MEU_DANFE_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("MEU_DANFE_API_KEY=da-dotenv\n", encoding="utf-8")
+    key = "9" * 44
+    (tmp_path / f"NFE-{key}.xml").write_text("<x/>", encoding="utf-8")
+    # Reuses the "filtered list ends up empty" path from the test above so
+    # no transport mocking is needed — this test only proves the config
+    # built successfully from ./.env (no ConfigurationError exit code).
+    rc = main(["--key", key, "--exclude-existing-in", str(tmp_path)])
+    assert rc == 0

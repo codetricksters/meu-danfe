@@ -9,7 +9,7 @@ from pathlib import Path
 
 from meu_danfe.cli._common import EXIT_CONFIG_ERROR, EXIT_OK, EXIT_PARTIAL_FAILURE, setup_logging
 from meu_danfe.client import MeuDanfeAsyncClient
-from meu_danfe.config import MeuDanfeConfig
+from meu_danfe.config import MeuDanfeConfig, default_dotenv_path
 from meu_danfe.exceptions import ConfigurationError
 from meu_danfe.keys import existing_keys_in_dir, load_keys
 
@@ -28,7 +28,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=10)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--max-polls", type=int, default=30)
-    parser.add_argument("--env-file", type=Path, default=None)
+    parser.add_argument("--env-file", type=Path, default=None,
+                         help="Default: ./.env if it exists (requires the `dotenv` extra)")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--exclude-existing-in", type=Path, default=None,
                          help="Skip keys already downloaded as *.xml in this directory")
@@ -38,7 +39,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 async def _run(args: argparse.Namespace) -> int:
     try:
         config = MeuDanfeConfig.from_env(
-            dotenv_path=args.env_file,
+            dotenv_path=args.env_file or default_dotenv_path(),
             max_concurrency=args.concurrency,
             timeout=args.timeout,
             max_polls=args.max_polls,

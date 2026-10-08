@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from meu_danfe.config import DEFAULT_BASE_URL, MeuDanfeConfig
+from meu_danfe.config import DEFAULT_BASE_URL, MeuDanfeConfig, default_dotenv_path
 from meu_danfe.exceptions import ConfigurationError
 
 
@@ -53,3 +55,22 @@ def test_from_env_without_dotenv_path_never_imports_dotenv(monkeypatch: pytest.M
     monkeypatch.setitem(sys.modules, "dotenv", None)  # import dotenv would now raise
     config = MeuDanfeConfig.from_env(env={"MEU_DANFE_API_KEY": "x"})
     assert config.api_key == "x"
+
+
+def test_default_dotenv_path_returns_env_file_in_cwd_when_present(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("MEU_DANFE_API_KEY=x\n", encoding="utf-8")
+    assert default_dotenv_path() == Path(".env")
+
+
+def test_default_dotenv_path_is_none_when_no_env_file_present(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert default_dotenv_path() is None
+
+
+def test_from_env_reads_api_key_from_dotenv_path(tmp_path) -> None:
+    pytest.importorskip("dotenv")
+    env_file = tmp_path / ".env"
+    env_file.write_text("MEU_DANFE_API_KEY=da-dotenv\n", encoding="utf-8")
+    config = MeuDanfeConfig.from_env(env={}, dotenv_path=env_file)
+    assert config.api_key == "da-dotenv"

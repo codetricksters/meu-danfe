@@ -79,3 +79,14 @@ def test_parse_endpoint_returns_rows_for_posted_xml(fixtures_dir) -> None:
 def test_server_settings_refuses_empty_token() -> None:
     with pytest.raises(ConfigurationError):
         ServerSettings(token="")
+
+
+def test_server_settings_from_env_reads_token_from_dotenv_path(tmp_path) -> None:
+    # Review-reproduced finding: the server's --env-file didn't feed
+    # ServerSettings at all, so a token stored in .env was ignored and the
+    # server refused to start even with a correct .env file.
+    pytest.importorskip("dotenv")
+    env_file = tmp_path / ".env"
+    env_file.write_text("MEU_DANFE_SERVER_TOKEN=da-dotenv\n", encoding="utf-8")
+    settings = ServerSettings.from_env(env={}, dotenv_path=env_file)
+    assert settings.token == "da-dotenv"

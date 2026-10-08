@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from meu_danfe.exceptions import ConfigurationError, MissingDependencyError
@@ -17,6 +18,34 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_CONCURRENCY = 10
 MIN_KEY_INTERVAL = 1.0
 DEFAULT_MAX_POLLS = 30
+
+
+def default_dotenv_path() -> Path | None:
+    """`./.env` if it exists in the current working directory, else None.
+
+    A plain function, not a module-level constant: calling it is a
+    filesystem check, and nothing in this module may touch the filesystem
+    merely by being imported.
+    """
+    candidate = Path(".env")
+    return candidate if candidate.is_file() else None
+
+
+def _merge_env_with_dotenv(env: Mapping[str, str], dotenv_path: Any | None) -> dict[str, str]:
+    """Shared by MeuDanfeConfig.from_env and ServerSettings.from_env: dotenv
+    file values first, then real environment values on top (env wins)."""
+    merged: dict[str, str] = dict(env)
+    if dotenv_path is None:
+        return merged
+    try:
+        from dotenv import dotenv_values
+    except ImportError as exc:
+        raise MissingDependencyError(
+            'dotenv_path foi passado, mas python-dotenv não está instalado. '
+            'Instale com: pip install "meu-danfe-downloader[dotenv]"'
+        ) from exc
+    file_values = {k: v for k, v in dotenv_values(dotenv_path).items() if v is not None}
+    return {**file_values, **merged}
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,17 +98,7 @@ class MeuDanfeConfig:
             import os
             env = os.environ
 
-        merged: dict[str, str] = dict(env)
-        if dotenv_path is not None:
-            try:
-                from dotenv import dotenv_values
-            except ImportError as exc:
-                raise MissingDependencyError(
-                    'dotenv_path foi passado, mas python-dotenv não está instalado. '
-                    'Instale com: pip install "meu-danfe-downloader[dotenv]"'
-                ) from exc
-            file_values = {k: v for k, v in dotenv_values(dotenv_path).items() if v is not None}
-            merged = {**file_values, **merged}
+        merged = _merge_env_with_dotenv(env, dotenv_path)
 
         api_key = overrides.pop("api_key", None) or merged.get(f"{prefix}API_KEY")
         if not api_key:
