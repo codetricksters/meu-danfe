@@ -240,3 +240,6 @@ test_output.xlsx
 
 # Claude Code local settings (personal, not shared)
 .claude/settings.local.json
+
+# Git worktrees used for isolated feature work
+.worktrees/
