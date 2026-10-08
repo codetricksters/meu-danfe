@@ -1,16 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
 [project]
 name = "meu-danfe-downloader"
 version = "0.1.0"
-description = "Add your description here"
+description = "Cliente da API Meu DANFE + extrator de dados de XML NFe/CT-e"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "httpx>=0.28.1",
-    "ipython>=9.13.0",
-    "openpyxl>=3.1.5",
-    "pandas>=3.0.2",
-    "pymupdf>=1.27.2.3",
-    "python-dotenv>=1.2.2",
-    "requests>=2.33.1",
     "xmltodict>=1.0.4",
 ]
+
+[project.optional-dependencies]
+excel = ["pandas>=3.0.2", "openpyxl>=3.1.5"]
+pdf = ["pymupdf>=1.27.2.3"]
+dotenv = ["python-dotenv>=1.2.2"]
+server = ["fastapi>=0.115", "uvicorn>=0.30"]
+cli = ["meu-danfe-downloader[excel,pdf,dotenv]"]
+all = ["meu-danfe-downloader[cli,server]"]
+
+[project.scripts]
+meu-danfe = "meu_danfe.cli.download:main"
+meu-danfe-download = "meu_danfe.cli.download:main"
+meu-danfe-to-excel = "meu_danfe.cli.to_excel:main"
+meu-danfe-pdf-keys = "meu_danfe.cli.pdf_keys:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/meu_danfe"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ipython>=9.13.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
