@@ -29,7 +29,7 @@ def test_save_writes_file_and_reports_exit_zero(tmp_path, monkeypatch) -> None:
         lambda *a, **kw: RealAsyncClient(*a, **{**kw, "transport": httpx.MockTransport(_ok_handler)}),
     )
     monkeypatch.setenv("MEU_DANFE_API_KEY", "chave-de-teste")
-    key = "k" * 44
+    key = "6" * 44  # must be 44 digits — the client now validates access keys
     rc = main(["--key", key, "--save", "--out", str(tmp_path)])
     assert rc == 0
     assert (tmp_path / "nota.xml").read_text(encoding="utf-8") == "<x/>"

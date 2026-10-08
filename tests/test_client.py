@@ -1,17 +1,23 @@
+import asyncio
+
 import httpx
 import pytest
 
 from meu_danfe.client import MeuDanfeAsyncClient
 from meu_danfe.exceptions import (
     AuthenticationError,
+    InvalidAccessKeyError,
     MalformedResponseError,
+    MeuDanfeError,
     PollTimeoutError,
     TransportError,
 )
 
 
 def _key(n: int = 1) -> str:
-    return str(n) * 44
+    # str(n) % 10, not n itself: for n >= 10, str(n) is 2+ chars, so
+    # str(n) * 44 would produce an 88+ char string — not a valid 44-digit key.
+    return str(n % 10) * 44
 
 
 async def _noop(_s: float) -> None:
@@ -105,3 +111,125 @@ async def test_one_connect_error_in_a_batch_does_not_cancel_the_others() -> None
     assert by_key[good_key].ok is True
     assert by_key[bad_key].ok is False
     assert isinstance(by_key[bad_key].error, TransportError)
+
+
+async def test_non_string_status_in_batch_does_not_kill_the_other_keys() -> None:
+    # Review-reproduced finding: {"status": [...]} makes `in DocumentStatus.__members__`
+    # raise TypeError (unhashable list), which used to escape `iter_fetch` uncaught.
+    good_key = _key(8)
+    bad_key = _key(9)
+    transport = _transport({good_key: [{"status": "OK"}], bad_key: [{"status": ["OK"]}]})
+    async with MeuDanfeAsyncClient("chave", transport=transport, sleep=_noop) as client:
+        results = await client.fetch_many([good_key, bad_key])
+    by_key = {r.key: r for r in results}
+    assert by_key[good_key].ok is True
+    assert by_key[bad_key].ok is False
+    assert isinstance(by_key[bad_key].error, MeuDanfeError)
+
+
+async def test_get_xml_non_dict_payload_does_not_kill_the_batch() -> None:
+    # Review-reproduced finding: a JSON list from get_xml raised AttributeError
+    # ('list' object has no attribute 'get'), uncaught by iter_fetch.
+    good_key = _key(10)
+    bad_key = _key(11)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "fd/add" in request.url.path:
+            return httpx.Response(200, json={"status": "OK"})
+        if bad_key in request.url.path:
+            return httpx.Response(200, json=["not", "a", "dict"])
+        return httpx.Response(200, json={"name": "n.xml", "type": "NFE", "format": "XML", "data": "<x/>"})
+
+    async with MeuDanfeAsyncClient("chave", transport=httpx.MockTransport(handler), sleep=_noop) as client:
+        results = await client.fetch_many([good_key, bad_key])
+    by_key = {r.key: r for r in results}
+    assert by_key[good_key].ok is True
+    assert by_key[bad_key].ok is False
+    assert isinstance(by_key[bad_key].error, MeuDanfeError)
+
+
+async def test_unexpected_exception_in_one_key_does_not_kill_the_batch() -> None:
+    # Defense in depth for Review Focus "one failing key must not take down
+    # a batch": even a bug we haven't anticipated must not escape iter_fetch.
+    good_key = _key(12)
+    bad_key = _key(13)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if bad_key in request.url.path:
+            raise RuntimeError("completely unanticipated bug")
+        if "fd/add" in request.url.path:
+            return httpx.Response(200, json={"status": "OK"})
+        return httpx.Response(200, json={"name": "n.xml", "type": "NFE", "format": "XML", "data": "<x/>"})
+
+    async with MeuDanfeAsyncClient("chave", transport=httpx.MockTransport(handler), sleep=_noop) as client:
+        results = await client.fetch_many([good_key, bad_key])
+    by_key = {r.key: r for r in results}
+    assert by_key[good_key].ok is True
+    assert by_key[bad_key].ok is False
+    assert isinstance(by_key[bad_key].error, MeuDanfeError)
+
+
+async def test_unvalidated_key_is_rejected_before_any_request_is_made() -> None:
+    # Review-reproduced finding: add("../../admin/delete?x=") built a request
+    # to that literal path — unvalidated keys were injected straight into the URL.
+    requests_made: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_made.append(str(request.url))
+        return httpx.Response(200, json={"status": "OK"})
+
+    async with MeuDanfeAsyncClient("chave", transport=httpx.MockTransport(handler), sleep=_noop) as client:
+        with pytest.raises(InvalidAccessKeyError):
+            await client.add("../../admin/delete?x=")
+
+    assert requests_made == []
+
+
+async def test_abandoning_iter_fetch_cancels_the_still_pending_requests() -> None:
+    # Review-reproduced finding: breaking out of `iter_fetch` early (or
+    # letting the generator get garbage collected) left other keys' requests
+    # running to completion anyway — continuing to spend R$0,03 per new key
+    # for a batch nobody is reading.
+    blocked_key = _key(7)
+    quick_key = _key(8)
+    release = asyncio.Event()
+    blocked_request_started = asyncio.Event()
+    resumed_after_release = {"n": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if blocked_key in request.url.path and "fd/add" in request.url.path:
+            blocked_request_started.set()
+            await release.wait()
+            resumed_after_release["n"] += 1
+            return httpx.Response(200, json={"status": "OK"})
+        if "fd/add" in request.url.path:
+            return httpx.Response(200, json={"status": "OK"})
+        return httpx.Response(200, json={"name": "n.xml", "type": "NFE", "format": "XML", "data": "<x/>"})
+
+    async with MeuDanfeAsyncClient("chave", transport=httpx.MockTransport(handler), sleep=_noop) as client:
+        agen = client.iter_fetch([quick_key, blocked_key])
+        first = await agen.__anext__()
+        assert first.key == quick_key
+        await blocked_request_started.wait()
+        await agen.aclose()  # consumer abandons the generator early
+
+    release.set()
+    await asyncio.sleep(0)  # let a NOT-cancelled task resume, if the bug is present
+    assert resumed_after_release["n"] == 0
+
+
+async def test_fetch_result_key_matches_the_caller_supplied_key_even_when_invalid() -> None:
+    good_key = _key(14)
+    bad_key = "not-a-valid-key"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "fd/add" in request.url.path:
+            return httpx.Response(200, json={"status": "OK"})
+        return httpx.Response(200, json={"name": "n.xml", "type": "NFE", "format": "XML", "data": "<x/>"})
+
+    async with MeuDanfeAsyncClient("chave", transport=httpx.MockTransport(handler), sleep=_noop) as client:
+        results = await client.fetch_many([good_key, bad_key])
+    by_key = {r.key: r for r in results}
+    assert by_key[good_key].ok is True
+    assert by_key[bad_key].ok is False
+    assert isinstance(by_key[bad_key].error, InvalidAccessKeyError)

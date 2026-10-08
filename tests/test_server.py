@@ -43,10 +43,12 @@ def test_fetch_with_wrong_token_is_rejected() -> None:
 
 
 def test_fetch_with_token_streams_one_ndjson_line_per_key() -> None:
+    # Must be real 44-digit keys: this request actually reaches the client,
+    # which now validates access keys before building any request.
     with TestClient(_app()) as client:
         resp = client.post(
             "/v1/documents/fetch",
-            json={"keys": ["k" * 44, "j" * 44]},
+            json={"keys": ["1" * 44, "2" * 44]},
             headers={"X-Meu-Danfe-Token": "segredo"},
         )
     assert resp.status_code == 200

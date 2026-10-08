@@ -35,11 +35,23 @@ class _LoopRunner:
         async def _advance() -> Any:
             return await agen.__anext__()
 
-        while True:
-            try:
-                yield self.run(_advance())
-            except StopAsyncIteration:
-                return
+        async def _aclose() -> None:
+            await agen.aclose()
+
+        try:
+            while True:
+                try:
+                    yield self.run(_advance())
+                except StopAsyncIteration:
+                    return
+        finally:
+            # Explicitly close the underlying async generator so its own
+            # cleanup (cancelling whatever requests are still in flight —
+            # see MeuDanfeAsyncClient.iter_fetch) runs deterministically
+            # when the sync consumer abandons this generator early, rather
+            # than relying on CPython's asyncio asyncgen finalizer hook to
+            # do it via garbage collection.
+            self.run(_aclose())
 
     def close(self) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)

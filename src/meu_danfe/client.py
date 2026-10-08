@@ -28,6 +28,7 @@ from meu_danfe.exceptions import (
     TransportError,
     error_from_response,
 )
+from meu_danfe.keys import validate_key
 from meu_danfe.models import AddResult, DocumentStatus, FetchResult, XmlDocument
 from meu_danfe.pacing import KeyPacer
 
@@ -104,9 +105,10 @@ class MeuDanfeAsyncClient:
         async with self._pacer.slot(key):
             try:
                 response = await self._http.request(method, path)
-            except httpx.TimeoutException as exc:
-                raise TransportError(f"{key}: tempo esgotado ao chamar {path}") from exc
-            except httpx.TransportError as exc:
+            except httpx.RequestError as exc:
+                # Covers TransportError, TimeoutException, DecodingError,
+                # TooManyRedirects — every network/protocol-level failure
+                # httpx can raise, not just the two originally anticipated.
                 raise TransportError(f"{key}: falha de transporte ao chamar {path}") from exc
         if response.status_code >= 400:
             raise error_from_response(key, response)
@@ -122,18 +124,26 @@ class MeuDanfeAsyncClient:
     def _status_from(self, key: str, response: httpx.Response) -> tuple[DocumentStatus, Any]:
         payload = self._parse_json(key, response, context="resposta de consulta")
         raw_status = payload.get("status") if isinstance(payload, dict) else None
-        if raw_status not in DocumentStatus.__members__:
+        # `isinstance(raw_status, str)` must be checked before the `in` membership
+        # test below: a non-string status (e.g. a list, from a malformed vendor
+        # response) makes `x in DocumentStatus.__members__` raise TypeError
+        # (unhashable type), which used to escape uncaught.
+        if not isinstance(raw_status, str) or raw_status not in DocumentStatus.__members__:
             raise MalformedResponseError(f"{key}: resposta sem campo 'status' reconhecível: {payload!r}")
         return DocumentStatus(raw_status), payload
 
     async def add(self, key: str) -> AddResult:
-        response = await self._request("PUT", f"fd/add/{key}", key=key)
+        request_key = validate_key(key)
+        response = await self._request("PUT", f"fd/add/{request_key}", key=key)
         status, payload = self._status_from(key, response)
         return AddResult(key=key, status=status, raw=payload)
 
     async def get_xml(self, key: str) -> XmlDocument:
-        response = await self._request("GET", f"fd/get/xml/{key}", key=key)
+        request_key = validate_key(key)
+        response = await self._request("GET", f"fd/get/xml/{request_key}", key=key)
         payload = self._parse_json(key, response, context="resposta de download")
+        if not isinstance(payload, dict):
+            raise MalformedResponseError(f"{key}: resposta de download não é um objeto JSON: {payload!r}")
         return XmlDocument(
             key=key,
             name=payload.get("name") or f"{key}.xml",
@@ -185,9 +195,27 @@ class MeuDanfeAsyncClient:
                 return FetchResult(key=key, status=result.status, document=None, error=None, polls=polls)
             except MeuDanfeError as exc:
                 return FetchResult(key=key, status=None, document=None, error=exc, polls=polls)
+            except Exception as exc:
+                # Batch isolation is the point of this method: even a bug we
+                # haven't anticipated for ONE key must not escape and cancel
+                # or lose the results of every other key in the batch.
+                return FetchResult(
+                    key=key, status=None, document=None,
+                    error=MeuDanfeError(f"{key}: erro inesperado: {exc}"), polls=polls,
+                )
 
         pending = {asyncio.ensure_future(_one(key)) for key in keys}
-        while pending:
-            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                yield await task
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    yield await task
+        finally:
+            # If the consumer abandons this generator early (breaks out of
+            # `async for`, or it's garbage collected), cancel whatever is
+            # still in flight instead of letting it keep running — and
+            # paying R$0,03 per new key — for a batch nobody is reading.
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
