@@ -63,3 +63,56 @@ async def test_pruning_does_not_evict_a_held_lock(fake_clock) -> None:
     # No assertion beyond "did not raise" / did not grow unbounded — pruning
     # is a memory-bound guard, not user-visible behaviour.
     assert len(pacer._key_locks) <= 3  # a little slack is fine; unbounded growth is not
+
+
+async def test_prune_respects_refcount_even_when_the_lock_is_momentarily_unlocked(fake_clock) -> None:
+    # Review-reproduced race: `.locked()` only reflects whether the lock is
+    # currently HELD. Between a holder releasing it and a waiter actually
+    # resuming to re-acquire it, `.locked()` is False for one event-loop
+    # iteration even though the key is still very much "in use". Pruning
+    # by `.locked()` alone could delete that key's _last_seen timestamp in
+    # that exact window — the waiter would then see no history and fire
+    # immediately, violating the >=1s rule. Refcount (incremented at
+    # _get_key_lock, decremented only when the whole slot cycle finishes)
+    # covers this window regardless of the lock object's own state.
+    pacer = KeyPacer(min_interval=0.0, max_tracked_keys=1, clock=fake_clock.clock, sleep=fake_clock.sleep,
+                      allow_unsafe_interval=True)
+    pacer._get_key_lock("race-key")  # simulates a coroutine mid-slot; refcount -> 1
+    assert not pacer._key_locks["race-key"].locked()  # the lock itself is NOT held
+
+    for i in range(5):
+        async with pacer.slot(f"other-{i}"):
+            pass
+
+    assert "race-key" in pacer._key_locks  # still protected by refcount, not by .locked()
+
+    pacer._release_key_lock("race-key")  # the simulated coroutine finishes its slot
+
+
+async def test_prune_skips_a_locked_entry_instead_of_giving_up(fake_clock) -> None:
+    # A long-held OLDEST lock must not disable pruning of newer, unlocked
+    # keys — the old code `break`s on the first locked entry it finds.
+    pacer = KeyPacer(min_interval=0.0, max_tracked_keys=1, clock=fake_clock.clock, sleep=fake_clock.sleep,
+                      allow_unsafe_interval=True)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder() -> None:
+        async with pacer.slot("oldest-held"):
+            entered.set()
+            await release.wait()
+
+    task = asyncio.create_task(holder())
+    await entered.wait()
+
+    for i in range(5):
+        async with pacer.slot(f"newer-{i}"):
+            pass
+
+    # Every "newer-*" key except the very last should have been pruned —
+    # pruning must not have stopped dead just because "oldest-held" (the
+    # actual oldest entry) couldn't be evicted.
+    assert "newer-0" not in pacer._key_locks
+
+    release.set()
+    await task
