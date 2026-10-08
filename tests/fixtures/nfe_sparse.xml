@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
+  <NFe>
+    <infNFe Id="NFe35260100000000000000000000000000000000003" versao="4.00">
+      <ide>
+        <nNF>125</nNF>
+        <serie>1</serie>
+        <dhEmi>2026-01-15T10:00:00-03:00</dhEmi>
+        <natOp>VENDA</natOp>
+      </ide>
+      <emit>
+        <CNPJ>11222333000181</CNPJ>
+        <xNome>Emitente Teste LTDA</xNome>
+        <enderEmit><UF>SP</UF></enderEmit>
+      </emit>
+      <dest>
+        <CNPJ>99888777000199</CNPJ>
+        <xNome>Destinatario Teste LTDA</xNome>
+      </dest>
+      <det nItem="1">
+        <prod>
+          <cProd>P001</cProd>
+          <xProd>Produto Um</xProd>
+          <NCM>12345678</NCM>
+          <CFOP>5102</CFOP>
+          <uCom>UN</uCom>
+          <qCom>2.0000</qCom>
+          <vUnCom>10.00</vUnCom>
+          <vProd>20.00</vProd>
+        </prod>
+        <imposto><ICMS><ICMS00><CST>00</CST><vBC>20.00</vBC><pICMS>18.00</pICMS><vICMS>3.60</vICMS></ICMS00></ICMS></imposto>
+      </det>
+      <total>
+        <ICMSTot><vNF>20.00</vNF><vProd>20.00</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg><vDesc>0.00</vDesc></ICMSTot>
+      </total>
+    </infNFe>
+  </NFe>
+  <protNFe><infProt><chNFe>35260100000000000000000000000000000000003</chNFe></infProt></protNFe>
+</nfeProc>
