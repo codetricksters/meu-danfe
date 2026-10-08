@@ -4,72 +4,86 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Brazilian NFe (Nota Fiscal Eletrônica) downloader and data extractor. Consumes the [Meu DANFE API](https://api.meudanfe.com.br) to search for and download electronic invoices by their 44-character access keys (Chave de Acesso), then extracts the XML fields into Excel spreadsheets.
+`meu_danfe` is a Brazilian NFe (Nota Fiscal Eletrônica) toolkit: an importable library that consumes the [Meu DANFE API](https://api.meudanfe.com.br) to search for and download electronic invoices by their 44-character access key (Chave de Acesso), parses NFe/CT-e XML into structured rows, and extracts access keys from DANFE PDFs. Three thin CLIs and an optional local HTTP server sit on top of the library — they hold no logic of their own.
 
-This project **does not expose an API of its own** — it is an API client plus two command-line tools.
+Any other tool can depend on this project directly (`uv add --editable`, a path, or a git URL) and call the library — no subprocess, no reimplementing the API's state machine or its rate-limit rule.
 
 ## Package Manager
 
 This project uses `uv`. Always use `uv` instead of `pip`:
 
 ```bash
-uv sync           # install dependencies
-uv add <pkg>      # add a dependency
-uv run python ... # run with the project's environment
+uv sync                      # install core dependencies
+uv sync --extra all          # install every optional extra (excel, pdf, dotenv, server)
+uv add <pkg>                 # add a dependency
+uv run python ...            # run with the project's environment
+uv run pytest -q             # run the test suite (no real network, no cost)
 ```
 
-Requires Python 3.14+.
+Requires Python ≥3.12.
 
 ## Running the Project
 
-There are no `[project.scripts]` entry points — invoke the scripts directly.
-
 ```bash
-# Download XMLs by access key
-uv run python app.py --key <44-char-key>
-uv run python app.py --file chaves.txt --save --out ./xmls/
+# Download XMLs by access key (installed as a script)
+uv run meu-danfe --key <44-char-key>
+uv run meu-danfe --file chaves.txt --save --out ./xmls/
 
 # Extract XML fields to Excel
-uv run python xml_to_excel.py --source ./xmls/ --name invoices --out ./reports/
-uv run python xml_to_excel.py --file nota.xml --name nota
+uv run meu-danfe-to-excel --source ./xmls/ --name invoices --out ./reports/
 
-uv run jupyter notebook notas-nb.ipynb
+# Extract access keys from DANFE PDFs
+uv run meu-danfe-pdf-keys --source ./pdfs/ --out keys.txt
+
+# Optional local HTTP server (requires MEU_DANFE_SERVER_TOKEN)
+uv run python -m meu_danfe.server
+
+uv run jupyter notebook notebooks/notas-nb.ipynb
 ```
 
 ## Architecture
 
-### CLIs
+### Library (`src/meu_danfe/`)
 
-- [app.py](app.py) — API client and downloader CLI (`argparse` + `httpx.AsyncClient`).
-  - `find_and_add_nfe(key, client)` queues a search (PUT `fd/add/{key}`, costs R$0.03/query).
-  - `get_nfe(key, client)` downloads the XML (GET `fd/get/xml/{key}`); the response JSON carries `name`, `type`, `format`, `data`.
-  - `process_key` runs the full lifecycle: queue → poll until a terminal status → download → save or print.
-  - Concurrency is capped by a module-level `asyncio.Semaphore(10)`; polling sleeps 1 s between requests for the same key.
-  - HTTP errors are mapped to Portuguese messages via `ERROR_MESSAGES` (400/401/402/403/404/500) and logged, not raised — failures return `None`.
-  - Flags: `--key` / `--file` (mutually exclusive, one required), `--save`, `--out`/`-o`.
+- `config.py` — `MeuDanfeConfig`, a frozen dataclass. Explicit constructor args are primary; `.from_env()` is the **only** place that reads `os.environ` or a `.env` file, and only when called. Nothing in this package touches the environment or disk at import time — importing `meu_danfe` with no `.env` present and no env vars set never raises.
+- `exceptions.py` — the exception tree every other module raises. `ERROR_MESSAGES` holds the vendor's Portuguese operator-facing text, verbatim, for HTTP 400/401/402/403/404/500; `error_from_response()` maps a response to the right typed exception.
+- `models.py` — `DocumentStatus` (WAITING/SEARCHING/NOT_FOUND/OK/ERROR, with `.is_terminal`/`.is_success`), `AddResult`, `XmlDocument` (with `.write_to()`), `FetchResult` (with `.ok`).
+- `pacing.py` — `KeyPacer`: guarantees ≥1 second between consecutive requests for the *same* access key, across every endpoint (add/poll/download), and bounds overall concurrency. This is the one rule a consumer must never be able to bypass — repeating a key within 1 second blocks the Meu DANFE account.
+- `client.py` — `MeuDanfeAsyncClient`: `add`, `get_xml`, `wait_for`, `fetch`, `fetch_many`, `iter_fetch`. The canonical implementation; async.
+- `sync_client.py` — `MeuDanfeClient`: the same method names, no `async`, running the *same* async client on a dedicated background event loop so the pacer's state and the HTTP connection pool survive across calls.
+- `storage.py` — `save_xml()` sanitizes the vendor-supplied filename so it can never write outside the destination directory.
+- `keys.py` — access key normalisation/validation and `existing_keys_in_dir()` (skip keys already downloaded, to avoid paying R$0,03 twice).
+- `nfe/` — `columns.json` + `columns.py` (the column-name → JSON-path map, overridable) and `parser.py` (`parse_xml`, `extract_rows`, one row per `<det>` product line, invoice fields repeated).
+- `pdf.py` — `extract_keys()` / `extract_keys_from_dir()`. Requires the `pdf` extra.
+- `excel.py` — `write_excel()`. Requires the `excel` extra.
+- `server/` — optional FastAPI app (`create_app()`), token-gated, binds `127.0.0.1` by default, one shared client per app lifetime. Requires the `server` extra.
 
-- [xml_to_excel.py](xml_to_excel.py) — XML → Excel CLI. Parses with `xmltodict` (`force_list=("det",)`) and writes one row per `<det>` item (product line), repeating invoice-level fields across rows. Flags: `--source` / `--file` (mutually exclusive, one required), `--name` (required, no extension), `--out`.
-  - Extracted columns come from [columns.json](columns.json) — a map of column name → JSON path into the parsed XML. The integer `0` in a path is a placeholder for the `det` index and is substituted per item. Add or remove columns there; no Python changes needed.
-  - Missing paths yield empty cells; dict/list values are serialised as JSON strings.
+### CLIs (`src/meu_danfe/cli/`)
 
-### One-off scripts
+Thin `argparse` wrappers — `download.py` (`meu-danfe`/`meu-danfe-download`), `to_excel.py` (`meu-danfe-to-excel`), `pdf_keys.py` (`meu-danfe-pdf-keys`). All logic lives in the library above; these only parse args, call it, and format output.
 
-These have **hardcoded absolute paths** pointing at the author's machine — adjust before running.
+### Optional extras
 
-- [pdf_key_extractor.py](pdf_key_extractor.py) — scrapes 44-digit access keys out of DANFE PDFs with PyMuPDF, appending them to `chaves_nfe.csv`. Reads from a hardcoded `WD`.
-- [filter_files.py](filter_files.py) — filters `todo.csv` into `out.csv`, dropping keys already downloaded to a hardcoded `src_dir`.
-- [notas-nb.ipynb](notas-nb.ipynb) — exploration notebook: maps NFe XML fields, filters PDFs against invoice data in [notas.tsv](notas.tsv).
+| Extra | Adds | Used by |
+|---|---|---|
+| `excel` | pandas, openpyxl | `excel.py`, `meu-danfe-to-excel` |
+| `pdf` | PyMuPDF | `pdf.py`, `meu-danfe-pdf-keys` |
+| `dotenv` | python-dotenv | `MeuDanfeConfig.from_env(dotenv_path=...)` |
+| `server` | fastapi, uvicorn, python-multipart | `server/` |
+| `cli` | excel + pdf + dotenv | running all three CLIs |
+| `all` | cli + server | everything |
 
 ### Configuration
 
-Credentials are loaded from `.env` via `python-dotenv` (`dotenv_values`, not `load_dotenv` — nothing reaches `os.environ`). Required variables:
-- `MEU_DANFE_API_KEY` — API token, sent as the `Api-Key` header
-- `MEU_DANFE_API_URL` — base URL for `httpx.AsyncClient(base_url=...)`, so endpoint paths are relative (`fd/add/{key}`)
-
-The `.env` also contains SharePoint, SQL Server (UAU-CLOUD), and Microsoft Graph API credentials used by the notebook.
+Required variables (see `.env.example`): `MEU_DANFE_API_KEY` (sent as the `Api-Key` header) and `MEU_DANFE_API_URL` (defaults to `https://api.meudanfe.com.br/v2/` — note the `/v2/`). The optional server reads `MEU_DANFE_SERVER_TOKEN` and refuses to start without it.
 
 ### API Behavior
 
-- `find_and_add_nfe` returns a response whose `status` is one of: `WAITING`, `SEARCHING`, `NOT_FOUND`, `OK`, `ERROR`. The terminal set is `NOT_FOUND`, `OK`, `ERROR`.
-- **Rate limit**: sending the same access key more than once within 1 second blocks the account. Keep the `await asyncio.sleep(1)` in the polling loop.
-- CT-e items and already-cached invoices are free; new NFe searches cost R$0.03 each. Avoid re-running downloads over keys already fetched.
+- `add()`/`wait_for()` return a status in `WAITING`, `SEARCHING`, `NOT_FOUND`, `OK`, `ERROR`. The terminal set is `NOT_FOUND`, `OK`, `ERROR`.
+- **Rate limit**: sending the same access key more than once within 1 second blocks the account — enforced by `KeyPacer`, not left to the caller.
+- CT-e items and already-cached invoices are free; new NFe searches cost R$0,03 each. `existing_keys_in_dir()` / `--exclude-existing-in` avoid paying twice for a key already downloaded.
+
+### Notes on the project's history
+
+- `notebooks/notas-nb.ipynb` is a prior exploration notebook, now updated to import the library instead of holding its own (older, synchronous, less careful) copy of the client and PDF key extractor.
+- `data/` (gitignored) holds local scratch inputs/outputs (`chaves_nfe.csv`, `notas.tsv`, `todo.csv`, `out.csv`) — not part of the library, not committed.
