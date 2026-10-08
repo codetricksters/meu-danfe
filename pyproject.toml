@@ -17,7 +17,7 @@ dependencies = [
 excel = ["pandas>=3.0.2", "openpyxl>=3.1.5"]
 pdf = ["pymupdf>=1.27.2.3"]
 dotenv = ["python-dotenv>=1.2.2"]
-server = ["fastapi>=0.115", "uvicorn>=0.30"]
+server = ["fastapi>=0.115", "uvicorn>=0.30", "python-multipart>=0.0.12"]
 cli = ["meu-danfe-downloader[excel,pdf,dotenv]"]
 all = ["meu-danfe-downloader[cli,server]"]
 
